@@ -7,18 +7,20 @@ library(dplyr)
 library(patchwork)
 library(ggpubr)
 library(tidyr)
+library(cowplot)
+
+ss_clust_colors<-c('#e5d25b','#599014','#e78071',"#a82d06","#4592bf","#d38219","#74a764","#8ca2b4","#cbb190","#e7ca8d","#9d9ec3","#593202","#ebafa4","#5e8a89","#ecd577","#7c606c","#5c6489","#ECE4B7","#D36135","#467599","#6A8D73","#C06C84","#355070","#E5989B","#9C6644")
+cancer_colors <- c("BRCA" = "#3D806F","ESCA" = "#608541","FTC" = "#7D4E57","OV"   = "#FFDC91","PACA" = "#718DAE","RC" = "#7876B1","THCA" = "#3E6086","UCEC" = "#20854E")
+
 
 # Chargement des données et création de l'objet seurat
 mtx_file <- "/Users/timotheeprimet/Desktop/ENS/1A/ImmEx/open science/mat/matrix.mtx"
 barcodes <- "/Users/timotheeprimet/Desktop/ENS/1A/ImmEx/open science/mat/barcodes.tsv"
 features <- "/Users/timotheeprimet/Desktop/ENS/1A/ImmEx/open science/mat/features.tsv"
 metadata_file <- "/Users/timotheeprimet/Desktop/ENS/1A/ImmEx/open science/GSE233236_metadata.tsv"
-
 counts <- ReadMtx(mtx = mtx_file,cells = barcodes,features = features,feature.column = 1)
 metadata <- read.table(metadata_file,sep = "\t",header = TRUE,row.names = 1,check.names = FALSE)
 seurat_full <- CreateSeuratObject(counts = counts)
-
-# ajouter les métadonnées dans le même ordre
 seurat_full <- AddMetaData(seurat_full,metadata = metadata[colnames(seurat_full), , drop = FALSE])
 
 # Quality control et filtre immunoglobulines
@@ -28,16 +30,14 @@ patterns_IG <- "^IG[HKL]"
 genes_to_remove_IG <- grep(patterns_IG, rownames(seurat_full), value = TRUE)
 seurat_full <- seurat_full[!rownames(seurat_full) %in% genes_to_remove_IG,]
 
-# Normalisation et sélection des HVG
+# Normalisation et  HVG
 seurat_full <- NormalizeData(seurat_full)
 seurat_full <- FindVariableFeatures(seurat_full, nfeatures = 2000)
+
 #Filtration des gènes de bruis parmi les HVG
 patterns_noise <- c("^RPS", "^RPL", "^MT-", "^MRPS", "^MRPL", "^HSP")
 genes_to_remove_noise <- grep(paste(patterns_noise, collapse = "|"),VariableFeatures(seurat_full),value = TRUE)
-VariableFeatures(seurat_full) <- setdiff(
-  VariableFeatures(seurat_full),
-  genes_to_remove_noise
-)
+VariableFeatures(seurat_full) <- setdiff(VariableFeatures(seurat_full),genes_to_remove_noise)
 
 # Réduction de dimension
 seurat_full <- ScaleData(seurat_full)
@@ -45,10 +45,6 @@ seurat_full <- RunPCA(seurat_full, features=VariableFeatures((seurat_full)))
 
 # PREMIER CLUSTERING
 seurat_full <- FindNeighbors(seurat_full, dims = 1:30)
-
-
-# la clustree et ROGUE
-
 seurat_full<- FindClusters(seurat_full, resolution = 0.2)
 seurat_full <- RunUMAP(seurat_full, dims = 1:30, umap.method = "uwot")
 
@@ -58,26 +54,17 @@ DimPlot(seurat_full, label = TRUE)
 
 Idents(seurat_full) <- "seurat_clusters"
 marker_genes <- c("TCL1A","CD27", "TNFRSF13B", "AICDA", "BCL6", "MKI67","MZB1")
-DotPlot(seurat_full, features = marker_genes) + RotatedAxis() + scale_color_gradient2(low = "blue", mid = "white", high = "red")
+DotPlot(seurat_full, features = marker_genes) + RotatedAxis()
 FeaturePlot(seurat_full, features = marker_genes, reduction = "umap")
 Idents(seurat_full) <- "seurat_clusters"
 
 # Annotation visuelle en fonction de Dot plot et feature plot 
-seurat_full <- RenameIdents(
-  seurat_full,
-  "0" = "Bm cells",
-  "1" = "ASC",
-  "2" = "ASC",
-  "3" = "Bn cells",
-  "4" = "Bgc cells",
-  "5" = "Bn cells",
-  "6" = "B cycling",
-  "7" = "ASC"
-)
+seurat_full <- RenameIdents(seurat_full,"0" = "Bm cells","1" = "ASC","2" = "ASC","3" = "Bn cells","4" = "Bgc cells","5" = "Bn cells","6" = "B cycling","7" = "ASC")
 seurat_full$celltype <- Idents(seurat_full)
 
-DimPlot(seurat_full, group.by = "celltype", label = TRUE) + ggtitle("Cell types annotés")
+DimPlot(seurat_full, group.by = "celltype", label = TRUE) + ggtitle("")
 DimPlot(seurat_full, group.by = "seurat_clusters", label = TRUE) + ggtitle("Clusters initiaux")
+cluster_1<-DimPlot(seurat_full, group.by = "celltype", label = TRUE)
 
 DotPlot(seurat_full, features = marker_genes, group.by = "celltype") + RotatedAxis()
 FeaturePlot(seurat_full, features = marker_genes, reduction = "umap")
@@ -124,25 +111,28 @@ for (lignee in lignees) {
   
   Idents(sub_cluster) <- "seurat_clusters"
   
+  prefix<-gsub(" ", "_", lignee)
+  sub_cluster$subcluster_global<-paste0(prefix, '_', Idents(sub_cluster))
+  Idents(sub_cluster)<-"subcluster_global"
+  
   seurat_sub_full[[lignee]] <- sub_cluster
   
   
-  # FindAllMarkers (Wilcoxon)(comme dans tableau S3)
-  # pour min.pct je sais pas
+  # FindAllMarkers (Wilcoxon)
   markers_noIG <- FindAllMarkers(sub_cluster,min.pct=0.25,logfc.threshold=0.25,test.use="wilcox")
   subcluster_markers_noIG[[lignee]] <- markers_noIG
-  
-  # top 50 gènes par sous-cluster
-  top50_noIG <- markers_noIG %>%group_by(cluster) %>%filter(p_val_adj<0.05)%>%arrange(desc(avg_log2FC), by_group=TRUE)%>%slice_head(n=50)%>%ungroup()
+    top50_noIG <- markers_noIG %>%group_by(cluster) %>%filter(p_val_adj<0.05)%>%arrange(desc(avg_log2FC), by_group=TRUE)%>%slice_head(n=50)%>%ungroup()
   top50_markers_noIG[[lignee]] <- top50_noIG
   
-  # DimPlot
-  p_dim <- DimPlot(sub_cluster, label = TRUE) + ggtitle(paste("Sous-clustering -", lignee))
+  
+  current_subclusters <- levels(Idents(sub_cluster))
+  cols_this <- setNames(ss_clust_colors[seq_along(current_subclusters)],current_subclusters)  
+  p_dim <- DimPlot(sub_cluster, label = TRUE,repel=TRUE, cols=cols_this) + ggtitle(paste(lignee))
   
   plots_dim[[lignee]] <- p_dim
   print(p_dim)
   
-  # DotPlot des top 5 marqueurs (on stocke top 50, mais on affiche top 5 pour la lisibilité)
+  #DotPlot des top 5 marqueurs (on stocke top 50, mais on affiche top 5 pour la lisibilité)
   if (nrow(top50_noIG) > 0) {
     top5_genes_noIG <- top50_noIG %>%
       group_by(cluster) %>%
@@ -159,6 +149,101 @@ for (lignee in lignees) {
       
       plots_dot_top_noIG[[lignee]] <- p_dot_top_noIG
       print(p_dot_top_noIG)
-    }
-  }
+    
+  }}}
+
+
+seurat_full$subcluster_global <- NA
+for (lignee in names(seurat_sub_full)) {
+  obj<-seurat_sub_full[[lignee]]
+  seurat_full$subcluster_global[colnames(obj)]<-obj$subcluster_global
 }
+
+table(seurat_full$subcluster_global, useNA = "ifany")
+
+all_subclusters<-unique(na.omit(seurat_full$subcluster_global))
+all_subclusters<-subclusters<-sort(all_subclusters)
+subcluster_colors<-setNames(ss_clust_colors[seq_along(all_subclusters)],all_subclusters)
+
+DimPlot(seurat_full, group.by = "subcluster_global", label=TRUE, repel=TRUE, cols=subcluster_colors)
+combined_umap <- wrap_plots(plots_dim, ncol = 2) 
+combined_umap
+
+combined_dotplots <- wrap_plots(plots_dot_top_noIG, ncol = 2)+plot_annotation(title = "Top marqueurs par lignée")
+combined_dotplots
+
+# Hétérogénéité des lignées par cancer
+df_lineage <- seurat_full@meta.data %>%
+  filter(!is.na(celltype), !is.na(Cancer)) %>%
+  group_by(SampleID, Cancer, celltype) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(SampleID) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+head(df_lineage)
+plots_lineages <- list()
+
+for (lignee in lignees) {
+  
+  df_tmp <- df_lineage %>% filter(celltype == lignee)
+  ymax <- max(df_tmp$prop, na.rm = TRUE)
+  p <- ggplot(df_tmp, aes(x = Cancer, y = prop, fill = Cancer, color = Cancer)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.1) +
+    geom_jitter(width = 0.2, size = 1, alpha = 0.6) +
+    stat_compare_means(method = "kruskal.test", label="p.format", label.y=ymax*1.05) +
+    scale_fill_manual(values = cancer_colors) +
+    scale_color_manual(values = cancer_colors) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+    theme_bw() +
+    labs(
+      title = lignee,
+      x = "Cancer",
+      y = "Proportion"
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "none"
+    ) +
+    guides(fill = "none", color = "none")
+  
+  plots_lineages[[lignee]] <- p
+}
+
+wrap_plots(plots_lineages, ncol = 2)
+
+# Hétérogénéité des sous-clusters par cancer
+df_subcluster <- seurat_full@meta.data %>%
+  filter(!is.na(subcluster_global), !is.na(Cancer)) %>%
+  group_by(orig.ident, Cancer, subcluster_global) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(orig.ident) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+df_subcluster_bar<-df_subcluster%>%group_by(Cancer, subcluster_global)%>%summarise(prop=mean(prop),.groups = "drop")
+
+p_subcluster_bar<-ggplot(
+  df_subcluster_bar, 
+  aes(x=Cancer, y=prop, fill=subcluster_global)
+  )+
+  geom_bar(stat='identity', position = 'stack', width=0.85)+
+  scale_fill_manual(values=subcluster_colors)+
+  theme_bw(base_size = 14)+
+  labs(x='Type de Cancer', y='Proportion moyenne')+
+  theme(axis.text.x = element_text(angle=45, hjust=1),legend.position='right')+
+  guides(fill=guide_legend(ncol = 2))
+p_subcluster_bar
+
+p_subcluster<-ggplot(
+  df_subcluster, 
+  aes(x=Cancer, y=prop, fill=subcluster_global)
+)+
+  geom_bar(stat='identity', position = 'fill', width=0.85)+
+  scale_fill_manual(values=subcluster_colors)+
+  theme_bw(base_size = 14)+
+  labs(x='Type de Cancer', y='Proportion moyenne')+
+  theme(axis.text.x = element_text(angle=45, hjust=1),legend.position='right')+
+  guides(fill=guide_legend(ncol = 2))
+p_subcluster
+  
