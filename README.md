@@ -20,7 +20,7 @@ Permet de réaliser :
 - PCA, UMAP
 - Clustering non-supervisé et annotation
 
-### 2. ROGUE
+### 2. ROGUE_CLUSTREE
 
 Ce script contient le code pour retrouver les résolutions à utiliser pour chaque clustering
 
