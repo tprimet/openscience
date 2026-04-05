@@ -22,7 +22,7 @@ Permet de réaliser :
 
 ### 2. ROGUE_CLUSTREE
 
-Ce script contient le code pour retrouver les résolutions à utiliser pour chaque clustering
+Ce script contient le code pour retrouver les résolutions à utiliser pour chaque clustering grâce aux algortithmes Clustree et ROGUE.
 
 ### 3. top50_markers_par_cluster.xlsx
 Fichier à télécharger pour obtenir un tableau excel contenant les 50 gènes définissant nos sous-clusters.
@@ -42,4 +42,8 @@ Packages principaux :
 - Matrix
 - cowplot
 - magrittr
-
+- ROGUE
+- tibble
+- clustree
+- ggforce
+- ggraphe
