@@ -1,1 +1,492 @@
+#Open Science pour clustree et ROGUE
+library(Matrix)
+library(Seurat)
+library(umap)
+library(ggplot2)
+library(ROGUE)
+library(tibble)
+library(clustree)
+library(patchwork)
+library(ggforce)
+library(ggraph)
+#On importe la matrice
+data <- Read10X(
+  data.dir = "C:/Users/Dell/Desktop/ENS/L3/S2/Open Science/Seurat",
+  gene.column = 1
+)
 
+seurat_obj <- CreateSeuratObject(counts = data)
+#On importe 
+metadata <- read.table("C:/Users/Dell/Desktop/ENS/L3/S2/Open Science/Données/Metadata.tsv",
+                       sep = "\t",
+                       header = TRUE,
+                       row.names = 1)
+# J'ajoute metadata a seuratobj
+seurat_obj<-AddMetaData(seurat_obj,metadata = metadata)
+#Pour créer sous forme d'une vraie matrice mais bcp trop lourd
+#data_m<-as.matrix(data)
+
+#Enlever les cellules qui expriment moins de 400 gènes et celles avec plus de 20% de gène mito
+seurat_obj[["percent.mt"]]<-PercentageFeatureSet(seurat_obj,pattern = "^MT-")
+seurat_obj<-subset(seurat_obj, subset=nFeature_RNA > 400 & percent.mt<20)
+#seurat_full<-seurat_obj
+#Enlever les gènes immunoglubuline
+patterns_IG <- "^IG"
+genes_to_remove_IG <- grep(patterns_IG, rownames(seurat_obj), value = TRUE)
+seurat_obj <- seurat_obj[!rownames(seurat_obj) %in% genes_to_remove_IG, ]
+
+# Normalisation, PCA, clustering, affichage + enlever certain gènes entre
+#seurat_full <- NormalizeData(seurat_full)
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures = 2000)
+
+# Enlever certains gènes
+patterns_ribo_mito <- c("^RPS", "^RPL", "^MT-", "^MRPS", "^MRPL", "^HSP")
+genes_to_remove_ribo_mito <- grep(paste(patterns_ribo_mito, collapse = "|"),VariableFeatures(seurat_obj), value = TRUE)
+VariableFeatures(seurat_obj)<-setdiff(
+  VariableFeatures(seurat_obj),
+  genes_to_remove_ribo_mito
+)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj, features=VariableFeatures(seurat_obj))
+seurat_obj <- FindNeighbors(seurat_obj,dims = 1:30)
+
+# On cherche la résolution par clustree
+
+for (res in c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)) {
+  seurat_obj <- FindClusters(seurat_obj, resolution = res)
+}
+
+p <- clustree(seurat_obj, prefix = "RNA_snn_res.")
+
+p$labels$title <- NULL
+
+p + 
+  guides(
+    colour      = guide_legend(title = "Résolutions", order = 1),
+    size        = guide_legend(title = "Taille des clusters", order = 2),
+    edge_colour = guide_edge_colourbar(title = "Nombre de cellules transférées", order = 3),
+    edge_alpha  = guide_legend(title = "Proportion des clusters de départ\ndans le cluster d'arrivée", order = 4)
+  ) +
+  theme(
+    legend.margin     = margin(10, 10, 10, 10),
+    legend.key.size   = unit(0.5, "cm"),
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 11)
+  )
+
+# Plage de résolution à tester avec ROGUE 0-0.4
+
+# Calcul de la meilleure résolution avec ROGUE
+seurat_rogue <- seurat_obj
+seurat_rogue <- NormalizeData(seurat_rogue)
+seurat_rogue <- FindVariableFeatures(seurat_rogue)
+seurat_rogue <- ScaleData(seurat_rogue)
+seurat_rogue <- RunPCA(seurat_rogue)
+seurat_rogue <- FindNeighbors(seurat_rogue, dims = 1:30)
+
+resolutions_seurat_rogue <- seq(0, 0.4, by = 0.05)
+
+rogue_scores_seurat_rogue <- list()
+
+for (res in resolutions_seurat_rogue) {
+  
+  tmp <- FindClusters(seurat_rogue, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_seurat_rogue[[as.character(res)]] <- rogue_res
+}
+
+rogue_mean_seurat_rogue <- numeric(length(rogue_scores_seurat_rogue))
+names(rogue_mean_seurat_rogue) <- names(rogue_scores_seurat_rogue)
+
+for (i in 1:length(rogue_scores_seurat_rogue)) {
+  rogue_mean_seurat_rogue[i] <- mean(as.numeric(rogue_scores_seurat_rogue[[i]]))
+}
+
+res_seurat_rogue <- as.numeric(names(rogue_mean_seurat_rogue))
+
+data.frame(
+  resolution = res_seurat_rogue,
+  rogue      = rogue_mean_seurat_rogue
+) |>
+  ggplot(aes(x = resolution, y = rogue)) +
+  geom_line(colour = "darkgreen", linewidth = 0.8) +
+  geom_point(colour = "darkgreen", size = 3) +
+  scale_x_continuous(breaks = res_seurat_rogue) +
+  labs(x = "Résolutions", y = "Score ROGUE moyen") +
+  theme_classic() +
+  theme(
+    axis.title  = element_text(size = 12, face = "bold"),
+    axis.text   = element_text(size = 10),
+    axis.line   = element_line(colour = "grey40"),
+    axis.ticks  = element_line(colour = "grey40"),
+    panel.grid.major.y = element_line(colour = "grey90", linetype = "dashed")
+  )
+
+
+# En fonction du clustree + ROGUE on prend 0.2 comme résolution
+seurat_obj <- FindClusters(seurat_obj,resolution=0.2)
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:30, umap.method = "uwot")
+DimPlot(seurat_obj)
+
+
+#Annotation
+markers = c("TCL1A",
+            "CD27","TNFRSF13B",
+            "AICDA","BCL6","MKI67",
+            "MZB1")
+
+# recopier clusters et UMAP dans seurat_full
+#seurat_full$seurat_clusters <- seurat_obj$seurat_clusters[colnames(seurat_full)]
+#seurat_full[["umap"]] <- seurat_obj[["umap"]]
+
+# Activer le cluster comme identité (en gros une seule variable ou colonne du tableau qui définit les cell)
+Idents(seurat_obj) <- "seurat_clusters"
+#Idents(seurat_full) <- "seurat_clusters"
+
+# Expression des gènes marqueurs par cluster
+DotPlot(seurat_obj, features = markers) + 
+  RotatedAxis() +
+  labs(
+    x = "Marqueurs canoniques",
+    y = "Clusters"
+  ) +
+  guides(
+    colour = guide_colourbar(title = "Niveau d'expression moyen"),
+    size   = guide_legend(title = "Pourcentage de cellules\nexprimant le gène")
+  )
+# Où se trouvent les cellules qui expriment ces gènes marqueurs
+FeaturePlot(seurat_obj, features = markers, reduction = "umap")
+
+
+# On renomme les cluster
+seurat_obj <- RenameIdents(seurat_obj,
+                           "0" = "Bm cells",
+                           "1" = "ASC",
+                           "2" = "Bn cells",
+                           "3" = "ASC",
+                           "4" = "Cycling B",
+                           "5" = "Bn cells",
+                           "6" = "Bgc cells",
+                           "7" = "ASC")
+#seurat_full <- RenameIdents(seurat_full,
+#                           "0" = "Bm cells",
+#                           "1" = "ASC",
+#                           "2" = "Bn cells",
+#                           "3" = "ASC",
+#                           "4" = "Cycling B",
+#                           "5" = "Bn cells",
+#                           "6" = "Bgc cells",
+#                           "7" = "ASC")
+
+# On sauvegarde dand le metadata
+seurat_obj$celltype <- Idents(seurat_obj)
+#seurat_full$celltype <- Idents(seurat_full)
+
+# On réaffiche le clustering
+DimPlot(seurat_obj)
+#DimPlot(seurat_full)
+
+# Faire des subsets pour chaque type
+cycl <- subset(seurat_obj, subset = celltype == "Cycling B")
+cycl <- NormalizeData(cycl)
+cycl <- FindVariableFeatures(cycl)
+cycl <- ScaleData(cycl)
+cycl <- RunPCA(cycl)
+cycl <- FindNeighbors(cycl, dims = 1:30)
+
+bn <- subset(seurat_obj, subset = celltype == "Bn cells")
+bn <- NormalizeData(bn)
+bn <- FindVariableFeatures(bn)
+bn <- ScaleData(bn)
+bn <- RunPCA(bn)
+bn <- FindNeighbors(bn, dims = 1:30)
+
+asc <- subset(seurat_obj, subset = celltype == "ASC")
+asc <- NormalizeData(asc)
+asc <- FindVariableFeatures(asc)
+asc <- ScaleData(asc)
+asc <- RunPCA(asc)
+asc <- FindNeighbors(asc, dims = 1:30)
+
+bm <- subset(seurat_obj, subset = celltype == "Bm cells")
+bm <- NormalizeData(bm)
+bm <- FindVariableFeatures(bm)
+bm <- ScaleData(bm)
+bm <- RunPCA(bm)
+bm <- FindNeighbors(bm, dims = 1:30)
+
+bgc <- subset(seurat_obj, subset = celltype == "Bgc cells")
+bgc <- NormalizeData(bgc)
+bgc <- FindVariableFeatures(bgc)
+bgc <- ScaleData(bgc)
+bgc <- RunPCA(bgc)
+bgc <- FindNeighbors(bgc, dims = 1:30)
+
+# Faire clustree pour chaque type pour avoir la résolution à utiliser (autre méthode que ROGUE)
+
+res_clustree<-c(0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8)
+
+for (res in res_clustree) {
+  cycl <- FindClusters(cycl, resolution = res)
+}
+
+clustree(cycl, prefix = "RNA_snn_res.") +
+  ggtitle("Évolution des clusters selon la résolution Cycling B")
+
+# bn particulièrement beau pour rapport et présentation
+for (res in res_clustree) {
+  bn <- FindClusters(bn, resolution = res)
+}
+
+p_bn <- clustree(bn, prefix = "RNA_snn_res.")
+
+p_bn$labels$title <- NULL
+
+p_bn + 
+  guides(
+    colour      = guide_legend(title = "Résolutions", order = 1),
+    size        = guide_legend(title = "Taille des clusters", order = 2),
+    edge_colour = guide_edge_colourbar(title = "Nombre de cellules transférées", order = 3),
+    edge_alpha  = guide_legend(title = "Proportion des clusters de départ\ndans le cluster d'arrivée", order = 4)
+  ) +
+  theme(
+    legend.margin     = margin(10, 10, 10, 10),
+    legend.key.size   = unit(0.5, "cm"),
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 11))
+
+
+for (res in res_clustree) {
+  bm <- FindClusters(bm, resolution = res)
+}
+
+clustree(bm, prefix = "RNA_snn_res.") +
+  ggtitle("Évolution des clusters selon la résolution Bm")
+
+for (res in res_clustree) {
+  asc <- FindClusters(asc, resolution = res)
+}
+
+clustree(asc, prefix = "RNA_snn_res.") +
+  ggtitle("Évolution des clusters selon la résolution ASC")
+
+for (res in res_clustree) {
+  bgc <- FindClusters(bgc, resolution = res)
+}
+
+clustree(bgc, prefix = "RNA_snn_res.") +
+  ggtitle("Évolution des clusters selon la résolution BGC")
+
+# plage de résolution choisie d apres clustree:
+# cycling b 0 - 0.8
+# bn 0 - 0.3
+# bm pas clair mais 0.5 - 0.8
+#asc 0 - 0.4
+# bgc 0 - 0.6
+
+# Calculer le score ROGUE pour tout type de cellules pour savoir quelle résolution prendre
+
+resolutions_cycl <- seq(0, 0.8, by = 0.05)
+
+rogue_scores_cycl <- list()
+
+for (res in resolutions_cycl) {
+  
+  tmp <- FindClusters(cycl, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_cycl[[as.character(res)]] <- rogue_res
+}
+rogue_mean_cycl <- numeric(length(rogue_scores_cycl))
+names(rogue_mean_cycl) <- names(rogue_scores_cycl)
+
+for (i in 1:length(rogue_scores_cycl)) {
+  rogue_mean_cycl[i] <- mean(as.numeric(rogue_scores_cycl[[i]]))
+}
+
+res_cycl <- as.numeric(names(rogue_mean_cycl))
+
+plot(res_cycl, rogue_mean_cycl,
+     type = "b",
+     pch = 16,
+     xlab = "Resolution",
+     ylab = "Mean ROGUE score",
+     main = "ROGUE score cycling B vs clustering resolution")
+
+
+resolutions_bm <- seq(0.5, 0.8, by = 0.05)
+
+rogue_scores_bm <- list()
+
+for (res in resolutions_bm) {
+  
+  tmp <- FindClusters(bm, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_bm[[as.character(res)]] <- rogue_res
+}
+rogue_mean_bm <- numeric(length(rogue_scores_bm))
+names(rogue_mean_bm) <- names(rogue_scores_bm)
+
+for (i in 1:length(rogue_scores_bm)) {
+  rogue_mean_bm[i] <- mean(as.numeric(rogue_scores_bm[[i]]))
+}
+
+res_bm <- as.numeric(names(rogue_mean_bm))
+
+plot(res_bm, rogue_mean_bm,
+     type = "b",
+     pch = 16,
+     xlab = "Resolution",
+     ylab = "Mean ROGUE score",
+     main = "ROGUE score Bm vs clustering resolution")
+
+
+# bn particulièrement beau pour rapport et présentation
+resolutions_bn <- seq(0, 0.3, by = 0.05)
+
+rogue_scores_bn <- list()
+
+for (res in resolutions_bn) {
+  
+  tmp <- FindClusters(bn, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_bn[[as.character(res)]] <- rogue_res
+}
+rogue_mean_bn <- numeric(length(rogue_scores_bn))
+names(rogue_mean_bn) <- names(rogue_scores_bn)
+
+for (i in 1:length(rogue_scores_bn)) {
+  rogue_mean_bn[i] <- mean(as.numeric(rogue_scores_bn[[i]]))
+}
+
+res_bn <- as.numeric(names(rogue_mean_bn))
+
+data.frame(
+  resolution = res_bn,
+  rogue      = rogue_mean_bn
+) |>
+  ggplot(aes(x = resolution, y = rogue)) +
+  geom_line(colour = "darkgreen", linewidth = 0.8) +
+  geom_point(colour = "darkgreen", size = 3) +
+  scale_x_continuous(breaks = res_bn) +
+  labs(x = "Résolutions", y = "Score ROGUE moyen") +
+  theme_classic() +
+  theme(
+    axis.title  = element_text(size = 12, face = "bold"),
+    axis.text   = element_text(size = 10),
+    axis.line   = element_line(colour = "grey40"),
+    axis.ticks  = element_line(colour = "grey40"),
+    panel.grid.major.y = element_line(colour = "grey90", linetype = "dashed")
+  )
+
+
+
+resolutions_asc <- seq(0, 0.4, by = 0.05)
+
+rogue_scores_asc <- list()
+
+for (res in resolutions_asc) {
+  
+  tmp <- FindClusters(asc, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_asc[[as.character(res)]] <- rogue_res
+}
+rogue_mean_asc <- numeric(length(rogue_scores_asc))
+names(rogue_mean_asc) <- names(rogue_scores_asc)
+
+for (i in 1:length(rogue_scores_asc)) {
+  rogue_mean_asc[i] <- mean(as.numeric(rogue_scores_asc[[i]]))
+}
+
+res_asc <- as.numeric(names(rogue_mean_asc))
+
+plot(res_asc, rogue_mean_asc,
+     type = "b",
+     pch = 16,
+     xlab = "Resolution",
+     ylab = "Mean ROGUE score",
+     main = "ROGUE score ASC vs clustering resolution")
+
+
+
+
+resolutions_bgc <- seq(0, 0.6, by = 0.05)
+
+rogue_scores_bgc <- list()
+
+for (res in resolutions_bgc) {
+  
+  tmp <- FindClusters(bgc, resolution = res)
+  
+  expr <- as.matrix(GetAssayData(tmp, layer = "counts"))
+  
+  clusters <- Idents(tmp)
+  
+  samples <- rep("sample1", ncol(expr))
+  
+  rogue_res <- rogue(expr, labels = clusters, samples = samples, platform = "UMI")
+  
+  rogue_scores_bgc[[as.character(res)]] <- rogue_res
+}
+rogue_mean_bgc <- numeric(length(rogue_scores_bgc))
+names(rogue_mean_bgc) <- names(rogue_scores_bgc)
+
+for (i in 1:length(rogue_scores_bgc)) {
+  rogue_mean_bgc[i] <- mean(as.numeric(rogue_scores_bgc[[i]]))
+}
+
+res_bgc <- as.numeric(names(rogue_mean_bgc))
+
+plot(res_bgc, rogue_mean_bgc,
+     type = "b",
+     pch = 16,
+     xlab = "Resolution",
+     ylab = "Mean ROGUE score",
+     main = "ROGUE score BGC vs clustering resolution")
+
+# Les résolutions à choisir après ROGUE
+# cycling b : 0.1
+# Bn : 0.05
+# ASC complexe : 0.2
+# Bm : 0.55 
+# BGC : 0.05 
